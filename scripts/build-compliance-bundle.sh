@@ -25,6 +25,9 @@ cp "$S"/sbom-*.spdx.json "$S"/sbom-*.cdx.json "$S"/build-inputs-*.txt "$O"/
 for f in "$S"/trivy-*.json; do cp "$f" "$O/vulnerabilities-$(basename "$f")"; done
 for f in "$S"/trivy-*.sarif; do cp "$f" "$O/vulnerabilities-$(basename "$f")"; done
 for f in "$S"/grype-*.json; do [ -e "$f" ] && cp "$f" "$O/vulnerabilities-$(basename "$f")"; done
+for f in "$S"/embedded-trivy-*.json "$S"/embedded-grype-*.json; do
+  if [ -e "$f" ]; then cp "$f" "$O/vulnerabilities-$(basename "$f")"; fi
+done
 cp "$ROOT/vex/pihole.openvex.json" "$O/vex.openvex.json"
 cp "$ROOT/compliance/CONTROL-MAPPING.md" "$O/control-mapping.md"
 for d in "$A"/lab/lab-*/; do
@@ -100,6 +103,23 @@ sev='["CRITICAL","HIGH","MEDIUM","LOW","UNKNOWN"]'
     echo "|---|---|---|---|---|---|"
     jq -r '.[] | "| \(.id) | \(.pkg) | \(.installed) | \(.fixed) | \(.severity) | \(.title | gsub("\\|"; "/") | .[0:80]) |"' <<<"$all"
   fi
+  echo
+  echo "## Embedded components (informational, not gated)"
+  echo
+  echo "Libraries compiled into the static \`pihole-FTL\` binary and the JavaScript bundled with the web interface. Package scanners cannot see them in the image; they are matched from the SBOM entries the build records. A fix can only come from a new upstream release."
+  echo
+  emb=$( { for f in "$S"/embedded-trivy-*.json; do [ ! -e "$f" ] || jq -c '.Results[]?.Vulnerabilities[]? | {id: .VulnerabilityID, pkg: .PkgName, installed: .InstalledVersion, fixed: (.FixedVersion // ""), severity: (.Severity | ascii_upcase), by: "Trivy"}' "$f"; done
+           for f in "$S"/embedded-grype-*.json; do [ ! -e "$f" ] || jq -c '.matches[]? | {id: ((if (.vulnerability.id | startswith("GHSA-")) then ([.relatedVulnerabilities[]?.id | select(startswith("CVE-"))] | first) else null end) // .vulnerability.id), pkg: .artifact.name, installed: .artifact.version, fixed: ((.vulnerability.fix.versions // []) | join(", ")), severity: (.vulnerability.severity | ascii_upcase), by: "Grype"}' "$f"; done
+         } | jq -s 'group_by([.id, .pkg]) | map(.[0] + {by: (map(.by) | unique | join(", "))})')
+  if [ "$(jq length <<<"$emb")" -eq 0 ]; then
+    echo "No known vulnerabilities matched."
+  else
+    echo "| ID | Component | Version | Fixed in | Severity | Matched by |"
+    echo "|---|---|---|---|---|---|"
+    jq -r '.[] | "| \(.id) | \(.pkg) | \(.installed) | \(.fixed) | \(.severity) | \(.by) |"' <<<"$emb"
+  fi
+  echo
+  sed -n '/^## Triage/,$p' "$ROOT/vex/EMBEDDED-TRIAGE.md"
   echo
   echo "Counts depend on the vulnerability database on the scan date. Re-scan the image digest to see current status."
 } >"$O/vulnerability-report.md"

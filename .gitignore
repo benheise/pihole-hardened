@@ -8,3 +8,7 @@ __pycache__/
 deploy/webpassword
 deploy/.env
 deploy/etc-pihole/
+# Editor swap and backup files
+*.kate-swp
+.*.swp
+*~

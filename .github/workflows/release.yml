@@ -153,6 +153,18 @@ jobs:
           output-format: json
           output-file: out/grype-${{ steps.p.outputs.key }}.json
 
+      # Libraries compiled into pihole-FTL and the bundled JavaScript: no
+      # package scanner sees them in the image, so they are scanned from the
+      # SBOM entries the build records. Informational: a fix can only come
+      # from upstream, and vex/EMBEDDED-TRIAGE.md records what each one means.
+      - name: Embedded components (Grype, not a gate)
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          sbom: out/embedded-${{ steps.p.outputs.key }}.cdx.json
+          fail-build: false
+          output-format: json
+          output-file: out/embedded-grype-${{ steps.p.outputs.key }}.json
+
       - name: Attest SBOMs, vulnerability scan and VEX to the platform image
         env:
           KEY: ${{ steps.p.outputs.key }}

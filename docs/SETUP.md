@@ -1,8 +1,10 @@
 # Setting up the pipeline in your own GitHub account
 
-About 30 minutes of clicking, plus about 30 minutes for the first release to
+About 30 minutes of clicking, plus 20 to 30 minutes for the first release to
 run. You need `git` and the [GitHub CLI](https://cli.github.com/), logged in
-with `gh auth login`.
+with `gh auth login`. When it asks, choose **HTTPS** and answer **Yes** to
+"Authenticate Git with your GitHub credentials": GitHub does not accept an
+account password for `git push`, and this makes git use the CLI's token.
 
 Order matters. Settings go in **before** the first push, because the first
 push to `main` starts a release.
@@ -69,6 +71,15 @@ git push -u origin main
 
 On macOS, use `sed -i ''` instead of `sed -i`.
 
+If the push fails:
+
+- *"Password authentication is not supported"* or *"Invalid username or
+  token"*: git is not using the CLI's login. Run `gh auth setup-git` and push
+  again.
+- *"refusing to allow an OAuth App to create or update workflow"*: the token
+  lacks the `workflow` scope, which a push containing `.github/workflows/`
+  needs. Run `gh auth refresh -h github.com -s workflow` and push again.
+
 ## 4. Watch the first release
 
 The push starts `release.yml`:
@@ -82,10 +93,13 @@ the two lab runs, which run in parallel. A few things happen for the first
 time here:
 
 - The first push to GHCR creates the package as **private**, linked to the
-  repository.
+  repository. Until you make it public (step 5), a host can only pull it
+  after `docker login ghcr.io` with a token that has `read:packages`.
 - The arm64 lab job is the first runtime test on ARM.
-- Lab variants V07 and V08 show as skipped on GitHub's runners, because the
-  host's DNS stub already uses port 53. They passed in the original lab run.
+- Lab variants V07 and V08 show as skipped on GitHub's runners ("host port
+  53 in use"), because the runner's DNS stub already uses port 53. The lab
+  report then reads "7 pass, 0 fail, 2 skipped" and the verdict is still
+  PASS. Both variants pass when the lab runs on a host with port 53 free.
 
 If a job fails, nothing is published, and an issue titled "Release pipeline
 failing" links to the run.
@@ -106,7 +120,7 @@ failing" links to the run.
    select repositories → `pihole-hardened`. The repository already has
    `renovate.json`, so Renovate skips onboarding. Check the *Dependency
    Dashboard* issue it opens: it should list the four Pi-hole releases,
-   Alpine, Trivy and the actions.
+   Alpine, Trivy, ORAS and the actions.
 4. **Verify the release from your machine** (needs `cosign` 3.x, `curl`, `jq`):
    ```sh
    scripts/verify-release.sh "$OWNER/pihole-hardened" latest
@@ -118,18 +132,24 @@ Follow *Deploy on a Raspberry Pi* in the README. From then on, the pipeline
 runs without you:
 
 - Renovate opens PRs for upstream releases, base image digests and action
-  updates. They merge automatically once CI passes, except for Trivy updates,
-  which wait for your review.
-- Every merge, and every Monday, the release workflow builds, scans,
-  lab-tests and publishes.
+  updates. Pi-hole releases, Alpine patch releases and digest refreshes, and
+  non-major action updates merge automatically once CI passes. Trivy and ORAS
+  updates, a new Alpine minor version and major action updates wait for your
+  review.
+- Every merge that changes the pins, the Dockerfile, scripts, lab, VEX or
+  workflows, and every Monday, the release workflow builds, scans, lab-tests
+  and publishes. A change to documentation or `deploy/` alone does not start
+  a release.
 - The Pi's timer verifies and installs the newest release, rolling back if
   it isn't healthy.
 
-Your remaining manual jobs: review Trivy updates (Renovate bumps the version;
-you verify and update the two tarball hashes in `upstream.env`, ideally
-against a second channel such as the `ghcr.io/aquasecurity/trivy` image);
-review VEX pull requests; handle a "Release pipeline failing" issue if one
-appears. One of its causes is deliberate: the release refuses to publish when
+Your remaining manual jobs: review Trivy and ORAS updates (Renovate bumps the
+version; you verify and update the two tarball hashes in `upstream.env`, for
+Trivy ideally against a second channel such as the
+`ghcr.io/aquasecurity/trivy` image); review VEX pull requests; when a
+release's `vulnerability-report.md` lists a CVE in an embedded library that
+`vex/EMBEDDED-TRIAGE.md` doesn't cover, judge it and add it there; handle a
+"Release pipeline failing" issue if one appears. One of its causes is deliberate: the release refuses to publish when
 an upstream tag or the FTL release asset changed content without changing its
 name, because that is what a replaced upstream release looks like.
 
@@ -198,7 +218,14 @@ the connection ID, `DOCKERHUB_USERNAME` to the organization name, and delete
 the `DOCKERHUB_TOKEN` secret. Personal accounts and free organizations can't
 use this.
 
-To have a Pi pull from Docker Hub instead of GHCR, set
+People who only want to run the image can use
+`deploy/docker-compose.dockerhub.yml`: one self-contained file with the same
+hardening, pulling `docker.io/OWNER/pihole-hardened:latest` (the `sed` in
+step 3 fills in `OWNER`; edit it if your Docker ID differs from your GitHub
+account). CI keeps it identical to `deploy/docker-compose.yml` apart from the
+image line.
+
+To have a Pi pull from Docker Hub instead of GHCR with verification, set
 `IMAGE_REPO=docker.io/your-docker-id/pihole-hardened` for `update.sh` (there
 is a commented line for it in `pihole-update.service`). The updater still
 reads the signed release from GitHub and only accepts a registry copy that

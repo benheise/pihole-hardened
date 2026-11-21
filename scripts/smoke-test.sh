@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Run the image under the production hardening settings and exercise every
-# runtime path: startup, DNS, API login, gravity and log rotation (the cron
+# runtime path: startup, DNS, API login, upstream's API guard on the settings
+# that would let an admin run code, gravity and log rotation (the cron
 # jobs), the update checker, and a clean shutdown. Also checks the posture the
 # image and compose file promise: no setuid files or apk, no NTP listener,
-# repository metadata not served, versions reported.
+# repository metadata not served, versions reported, and root not writing
+# through paths the unprivileged pihole user controls.
 #
 # usage: scripts/smoke-test.sh <image>
 set -euo pipefail
@@ -22,6 +24,7 @@ docker run -d --name "$N" -v /etc/pihole \
   -e TZ=UTC -e FTLCONF_dns_listeningMode=ALL \
   -e FTLCONF_ntp_ipv4_active=false -e FTLCONF_ntp_ipv6_active=false -e FTLCONF_ntp_sync_active=false \
   -e 'FTLCONF_webserver_advancedOpts=hide_files_patterns=**/.*' \
+  -e FTLCONF_webserver_session_restore=false \
   -e PIHOLE_UID=1999 -e PIHOLE_GID=1999 \
   --cap-drop ALL \
   --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
@@ -49,10 +52,27 @@ echo "ok   DNS answers"
   || fail "pihole-FTL has effective capabilities"
 echo "ok   FTL runs as pihole with no capabilities"
 
-valid=$(docker exec "$N" curl -sk -X POST https://127.0.0.1/api/auth -d '{"password":"smoke-test"}' | jq -r .session.valid)
-[ "$valid" = true ] || fail "API login with the secret-file password failed"
+sid=$(docker exec "$N" curl -sk -X POST https://127.0.0.1/api/auth -d '{"password":"smoke-test"}' | jq -r '.session | select(.valid) | .sid')
+[ -n "$sid" ] || fail "API login with the secret-file password failed"
 docker inspect -f '{{json .Config.Env}}' "$N" | grep -q 'smoke-test' && fail "password visible in the container environment"
 echo "ok   API login (password from secret file, not in the environment)"
+
+# The admin-to-code-execution guard is upstream's: the API refuses to change
+# the settings that would let a logged-in admin (or a stolen session) run
+# code inside the container: the web root (server-side Lua pages) and raw
+# dnsmasq lines (script hooks). If a Pi-hole update ever loosens that, the
+# hardening in this image no longer contains a web-interface compromise.
+for change in '{"config":{"webserver":{"paths":{"webroot":"/etc/pihole"}}}}' \
+              '{"config":{"misc":{"dnsmasq_lines":["dhcp-script=/bin/true"]}}}'; do
+  code=$(docker exec "$N" curl -sk -o /dev/null -w '%{http_code}' -X PATCH https://127.0.0.1/api/config \
+    -H "sid: $sid" -d "$change")
+  [ "$code" = 400 ] || fail "the API accepted $change (HTTP $code)"
+done
+[ "$(docker exec "$N" pihole-FTL --config webserver.paths.webroot)" = /var/www/html ] || fail "web root changed through the API"
+[ "$(docker exec "$N" pihole-FTL --config misc.dnsmasq_lines)" = "[]" ] || fail "dnsmasq lines changed through the API"
+code=$(docker exec "$N" curl -sk -o /dev/null -w '%{http_code}' https://127.0.0.1/api/config/dns/port)
+[ "$code" = 401 ] || fail "the API answered a config read without a session (HTTP $code)"
+echo "ok   API refuses web-root and dnsmasq-line changes; config needs a session"
 
 # Pre-login attack surface: only what the login page needs is served
 for p in /admin/.gitignore /admin/.github/dependabot.yml /admin/README.md /admin/package-lock.json; do
@@ -83,6 +103,30 @@ for k in CORE_VERSION WEB_VERSION FTL_VERSION DOCKER_VERSION; do
   case "$v" in ""|null) fail "$k is '$v' in /etc/pihole/versions" ;; esac
 done
 echo "ok   update checker; versions reported ($(sed -n 's/^CORE_VERSION=//p' <<<"$versions"), $(sed -n 's/^WEB_VERSION=//p' <<<"$versions"), $(sed -n 's/^FTL_VERSION=//p' <<<"$versions"))"
+
+# Root must not write through paths the unprivileged pihole user controls
+# (scripts/patch-upstream.sh). Plant what a compromised FTL could plant, then
+# run every job in root's crontab the way crond does, and restart.
+docker exec "$N" sh -c 'echo canary > /canary && chmod 600 /canary'
+docker exec -u pihole "$N" sh -c '
+  rm -f /var/log/pihole/pihole_updateGravity.log /etc/pihole/adlists.list
+  ln -s /canary /var/log/pihole/pihole_updateGravity.log
+  ln -s /created-by-root /etc/pihole/adlists.list' || fail "could not plant the test symlinks as the pihole user"
+docker exec "$N" sh -c 'crontab -l | grep -v "^#" | grep . | sed -E "s/^([^ ]+ +){5}//" | while IFS= read -r job; do sh -c "$job" >/dev/null 2>&1 || true; done'
+[ "$(docker exec "$N" cat /canary)" = canary ] || fail "a root cron job wrote through a symlink owned by the pihole user"
+docker exec -u pihole "$N" rm -f /var/log/pihole/pihole_updateGravity.log
+docker exec "$N" sh -c 'crontab -l | grep updateGravity | sed -E "s/^([^ ]+ +){5}//" | sh >/dev/null 2>&1'
+[ "$(docker exec "$N" stat -c %U /var/log/pihole/pihole_updateGravity.log)" = pihole ] \
+  && docker exec "$N" test -s /var/log/pihole/pihole_updateGravity.log || fail "the gravity cron job no longer writes its log"
+docker restart "$N" >/dev/null
+for _ in $(seq 60); do
+  [ "$(docker inspect -f '{{if .State.Running}}{{.State.Health.Status}}{{else}}exited{{end}}' "$N")" = healthy ] && break
+  sleep 2
+done
+[ "$(docker inspect -f '{{.State.Health.Status}}' "$N")" = healthy ] || fail "not healthy after a restart with a planted adlists.list symlink"
+docker exec "$N" test -e /created-by-root && fail "root created a file through a dangling symlink in /etc/pihole at start"
+docker exec -u pihole "$N" rm -f /etc/pihole/adlists.list
+echo "ok   root does not write through pihole-owned paths (cron jobs, startup); gravity job still logs"
 
 docker exec "$N" sh -c '[ -z "$(find / -xdev -type f -perm /6000 2>/dev/null)" ] && ! command -v apk >/dev/null' \
   || fail "setuid files or the apk binary are present"

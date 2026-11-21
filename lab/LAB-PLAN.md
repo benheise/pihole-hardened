@@ -13,8 +13,14 @@ upstream is visible even when both "pass".
 
 | Role | Image | Runtime settings |
 |---|---|---|
-| control | `pihole/pihole:2026.10.1` (pulled via `mirror.gcr.io`) | Docker defaults, as most people run it |
-| subject | `pihole-hardened` built from this repo | `deploy/docker-compose.yml` hardening: cap_drop ALL + 7 caps, no-new-privileges, `PIHOLE_UID/GID=1999`, pids/memory limits |
+| control | `pihole/pihole:<tag pinned in upstream.env>` (`CONTROL_IMAGE` overrides it) | Docker defaults, as most people run it |
+| subject | `pihole-hardened` built from this repo, or the image a release just built (`SUBJECT_IMAGE`) | `deploy/docker-compose.yml` hardening: cap_drop ALL + 7 caps, no-new-privileges, `PIHOLE_UID/GID=1999`, pids/memory limits, `/tmp` tmpfs |
+
+The lab compares features, so both images get the same Pi-hole settings, and
+three production settings are left out on purpose: FTL's NTP server stays on
+(test N01 needs it), the admin password is set through the environment, and
+the dot-file and session settings are not applied. `scripts/smoke-test.sh`
+is what runs the image with the production settings.
 
 ## Topology
 
@@ -181,8 +187,11 @@ Requirements: Docker Engine with Compose v2, `curl`, `jq`, `python3`, host port
 
 ## Out of scope / known limits
 
-- **CPU architecture:** runs on the host's architecture only. ARM runtime is
-  covered by the `ubuntu-24.04-arm` CI smoke job, not this lab.
+- **CPU architecture:** runs on the host's architecture only. The release
+  workflow runs it on amd64 and arm64 runners; 32-bit ARM (arm/v7) is built
+  and scanned but not run.
+- **Host networking on GitHub's runners:** V07 and V08 are skipped there
+  because the runner's own DNS stub holds port 53.
 - **Real LAN DHCP:** V04–V06 test the DHCP server on a Docker bridge. They
   prove the server works under the hardened capability set, not reachability
   across a physical LAN.

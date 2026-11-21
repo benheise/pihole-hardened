@@ -11,6 +11,9 @@
 #   vuln-KEY.cosign.json  cosign vulnerability-attestation predicate
 #   sbom-KEY.spdx.json    SPDX 2.3 SBOM (Alpine packages + Pi-hole components)
 #   sbom-KEY.cdx.json     CycloneDX 1.6 SBOM (same content)
+#   embedded-KEY.cdx.json       only the libraries inside pihole-FTL and the
+#                               web interface's bundled JavaScript
+#   embedded-trivy-KEY.json     Trivy's findings for those (informational)
 # needs: trivy, docker, python3
 set -euo pipefail
 REF=${1:?usage: scan-image.sh <image-ref> <platform> <out-dir>}
@@ -37,10 +40,20 @@ docker cp -q "$cid:/usr/share/pihole-hardened/build-inputs.txt" "$OUT/build-inpu
 docker cp -q "$cid:/pihole.docker.tag" "$tmp/docker.tag"
 docker rm "$cid" >/dev/null
 python3 -I scripts/sbom-add-pihole.py "$OUT/build-inputs-$KEY.txt" "$(tr -d '[:space:]' <"$tmp/docker.tag")" \
-  "$OUT/sbom-$KEY.spdx.json" "$OUT/sbom-$KEY.cdx.json"
+  "$OUT/sbom-$KEY.spdx.json" "$OUT/sbom-$KEY.cdx.json" "$OUT/embedded-$KEY.cdx.json"
 rm -rf "$tmp"
+
+# Known CVEs in the embedded libraries. Informational, never a gate: a fix
+# can only come from a new upstream release, and whether a library CVE is
+# reachable in Pi-hole needs a person to judge (vex/EMBEDDED-TRIAGE.md).
+# Trivy matches the JavaScript packages; the release workflow adds Grype,
+# which also matches the C libraries by CPE.
+trivy sbom --quiet --scanners vuln --format json \
+  --output "$OUT/embedded-trivy-$KEY.json" "$OUT/embedded-$KEY.cdx.json"
 
 jq -r --arg k "$KEY" '[.Results[]?.Vulnerabilities[]?] as $v
   | "\($k): \($v | length) findings (" +
     (["CRITICAL","HIGH","MEDIUM","LOW","UNKNOWN"] | map(. as $s | "\($s)=\([$v[] | select(.Severity == $s)] | length)") | join(" ")) + ")"' \
   "$OUT/trivy-$KEY.json"
+jq -r --arg k "$KEY" '"\($k): \([.Results[]?.Vulnerabilities[]?] | length) findings in embedded components (informational)"' \
+  "$OUT/embedded-trivy-$KEY.json"

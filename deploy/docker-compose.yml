@@ -1,5 +1,7 @@
 # Production deployment for a Raspberry Pi (DNS only, bridge networking).
-# Tested settings: every option here is exercised by scripts/smoke-test.sh.
+# Tested settings: scripts/smoke-test.sh runs the image with the same
+# capabilities, security options, limits and FTL settings as this file
+# (not the time zone, database retention, published ports or log options).
 #
 # Before first start:
 #   - set PIHOLE_IMAGE in .env to a verified digest (deploy/update.sh does this)
@@ -8,6 +10,12 @@
 #     "docker inspect" or the compose environment
 #   - free port 53 on the host: set DNSStubListener=no in
 #     /etc/systemd/resolved.conf and restart systemd-resolved
+#
+# Portainer or another web editor: the ./ paths below are relative to this
+# file's folder, which a pasted stack does not have. Use absolute paths on the
+# Docker host instead (for example /opt/pihole/webpassword and
+# /opt/pihole/etc-pihole), and set PIHOLE_IMAGE in the stack's environment
+# variables or write the image reference into the image: line.
 services:
   pihole:
     image: ${PIHOLE_IMAGE:?set PIHOLE_IMAGE to ghcr.io/benheise/pihole-hardened@sha256:...}
@@ -18,7 +26,14 @@ services:
       # interface only, prefix the LAN address: "192.168.1.2:53:53/udp".
       - "53:53/tcp"
       - "53:53/udp"
-      - "127.0.0.1:8443:443/tcp"   # admin UI on localhost only; publish to the LAN deliberately
+      # Admin UI on localhost only. Before publishing it to the LAN, know that
+      # anyone who can reach this port can try passwords (about three guesses
+      # per second, no lockout), can keep you from logging in by flooding the
+      # login, and can make the UI unresponsive with ~50 idle connections.
+      # DNS keeps working through all of that. Use a long password, turn on
+      # 2FA (Settings > Web interface / API), and never publish port 80: the
+      # login also works over plain HTTP. See docs/verification/SECURITY-REVIEW-2026-11-20.md.
+      - "127.0.0.1:8443:443/tcp"
     environment:
       TZ: America/New_York
       FTLCONF_dns_listeningMode: ALL   # required on bridge networks: queries arrive from the bridge IP
@@ -36,6 +51,15 @@ services:
       # metadata, and this makes CivetWeb answer 404 for any dot-file or
       # dot-directory, which FTL would otherwise serve before login.
       FTLCONF_webserver_advancedOpts: "hide_files_patterns=**/.*"
+      # Don't keep login sessions across restarts. By default FTL saves the
+      # live session tokens, unencrypted, in pihole-FTL.db, so a copy or backup
+      # of ./etc-pihole would contain them. Cost: you log in again after a restart.
+      FTLCONF_webserver_session_restore: "false"
+      # Optional, off by default as upstream ships them:
+      #   FTLCONF_dns_dnssec: "true"      # validate DNSSEC; the upstream resolvers must support it
+      #   FTLCONF_misc_dnsmasq_lines: "stop-dns-rebind"   # drop upstream answers that point at
+      #                                   # private addresses (DNS rebinding); breaks split-horizon
+      #                                   # names that resolve to LAN addresses via the upstream
       # Run FTL under a dedicated UID/GID. The default (1000) is usually the
       # Pi's main login user, who would then own ./etc-pihole, including the
       # query history and the admin password hash.
@@ -52,7 +76,7 @@ services:
     #   CHOWN, FOWNER     fix ownership/permissions of /etc/pihole and logs
     #   DAC_OVERRIDE      root must rename pihole-owned logs during rotation;
     #                     without it rotation fails silently and logs grow forever
-    #   SETUID, SETGID    drop to the pihole user (capsh, sudo, su)
+    #   SETUID, SETGID    drop to the pihole user (capsh, setpriv, su)
     #   SETFCAP           start.sh applies setcap on every start; without it the
     #                     container exits ("Unable to set capabilities")
     #   KILL              stop FTL cleanly; without it shutdown waits 30s and
