@@ -132,11 +132,14 @@ On the Pi, one command does the whole installation: prerequisites, files,
 password, signature check, start, and the nightly update timer.
 
 ```sh
-curl -fsSLO "https://raw.githubusercontent.com/$OWNER/pihole-hardened/main/deploy/install.sh"
-sudo bash install.sh --repo "$OWNER/pihole-hardened"
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/OWNER/pihole-hardened/main/deploy/install.sh)"
 ```
 
-Read the script first if you like; it asks before each change it makes
+Replace `OWNER` with your GitHub account name (the Pi has no `$OWNER`
+variable). The script already knows which repository to install from,
+because the `sed` in step 3 filled it in. To read it before running it,
+download it with `curl -fsSLO <same URL>` and run `sudo bash install.sh`;
+the README shows both forms. Either way it asks before each change it makes
 outside `/opt/pihole`. *Deploy on a Raspberry Pi* in the README describes
 what it does, what it trusts, and the manual steps it replaces. Things it
 handles that otherwise stop a first deployment:
