@@ -128,8 +128,27 @@ failing" links to the run.
 
 ## 6. Deploy to the Pi
 
-Follow *Deploy on a Raspberry Pi* in the README. From then on, the pipeline
-runs without you:
+On the Pi, one command does the whole installation: prerequisites, files,
+password, signature check, start, and the nightly update timer.
+
+```sh
+curl -fsSLO "https://raw.githubusercontent.com/$OWNER/pihole-hardened/main/deploy/install.sh"
+sudo bash install.sh --repo "$OWNER/pihole-hardened"
+```
+
+Read the script first if you like; it asks before each change it makes
+outside `/opt/pihole`. *Deploy on a Raspberry Pi* in the README describes
+what it does, what it trusts, and the manual steps it replaces. Things it
+handles that otherwise stop a first deployment:
+
+- `cosign` missing or older than 3.x (the release cannot be verified).
+- A Pi that uses itself as its DNS server: with no Pi-hole running yet, it
+  cannot resolve `ghcr.io` to pull the image.
+- A GHCR package that is still private (step 5.1).
+- An existing Pi-hole container, including a Portainer stack: it is replaced
+  and its data and password are kept.
+
+From then on, the pipeline runs without you:
 
 - Renovate opens PRs for upstream releases, base image digests and action
   updates. Pi-hole releases, Alpine patch releases and digest refreshes, and
@@ -140,8 +159,10 @@ runs without you:
   workflows, and every Monday, the release workflow builds, scans, lab-tests
   and publishes. A change to documentation or `deploy/` alone does not start
   a release.
-- The Pi's timer verifies and installs the newest release, rolling back if
-  it isn't healthy.
+- The Pi's timer verifies and installs the newest release every night,
+  rolling back if it isn't healthy. `sudo /opt/pihole/update.sh` does the
+  same on demand. Machine-specific settings go in
+  `/opt/pihole/docker-compose.override.yml`, which updates leave alone.
 
 Your remaining manual jobs: review Trivy and ORAS updates (Renovate bumps the
 version; you verify and update the two tarball hashes in `upstream.env`, for

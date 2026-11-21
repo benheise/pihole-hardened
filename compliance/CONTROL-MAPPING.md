@@ -34,9 +34,9 @@ you've drawn it. Many organizations treat it as part of boundary protection
 | SC.L1-b.1.x | Monitor, control, protect communications at boundaries | DNS-layer filtering with logged queries; blocking verified each release | Lab tests B01–B17, M03 | Network design, firewall |
 | SC.L1-b.1.xi | Separate publicly accessible components | — | — | Network segmentation |
 | SI.L1-b.1.xii | Identify, report and correct flaws in a timely manner | Renovate tracks upstream and base updates; weekly rebuild; release blocked on fixable HIGH/CRITICAL; upstream bugs reported | `vulnerability-report.md`, scan SARIF in code scanning, Renovate PR history, release history | Patch deployment SLA; the Pi's host OS |
-| SI.L1-b.1.xiii | Malicious code protection | Blocks DNS resolution of listed malicious domains; deploys only signed, verified images | Lab blocking tests; `verify-release.sh` | Endpoint anti-malware (DNS filtering is partial coverage) |
+| SI.L1-b.1.xiii | Malicious code protection | Blocks DNS resolution of listed malicious domains; deploys only signed, verified images (the installer and the updater refuse a release that does not verify) | Lab blocking tests; `verify-release.sh` | Endpoint anti-malware (DNS filtering is partial coverage) |
 | SI.L1-b.1.xiv | Update malicious code protection | Blocklists refresh weekly (gravity cron); scanner databases refresh on every run | Lab test M05; workflow logs | Choice of blocklists |
-| SI.L1-b.1.xv | Periodic scans; scan files from external sources | Every build and weekly rebuild is scanned; the image (an external download) is verified before deployment | Scan reports per release; `deploy/update.sh` | Scanning other systems |
+| SI.L1-b.1.xv | Periodic scans; scan files from external sources | Every build and weekly rebuild is scanned; the image (an external download) is verified before deployment, at installation and at every update | Scan reports per release; `deploy/install.sh`, `deploy/update.sh` | Scanning other systems |
 
 ## NIST SP 800-190 (Application Container Security Guide)
 

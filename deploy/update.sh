@@ -4,7 +4,8 @@
 # Run by deploy/pihole-update.timer. Needs docker compose, cosign 3.x, curl,
 # jq, and verify-release.sh next to this script.
 #
-# env: REPO=owner/repo (required), PIHOLE_DIR (default /opt/pihole)
+# env: REPO=owner/repo (required; read from PIHOLE_REPO in .env when unset,
+#      which deploy/install.sh writes), PIHOLE_DIR (default /opt/pihole)
 #      IMAGE_REPO=docker.io/owner/pihole-hardened to pull the Docker Hub copy
 #      instead of GHCR (same digest and signatures; verify-release.sh checks
 #      that the signed release names that copy).
@@ -12,9 +13,15 @@
 #      a "latest" that is older than what runs is refused: every release is
 #      signed, so a re-published old release would otherwise verify fine.
 set -euo pipefail
-REPO=${REPO:?set REPO=owner/repo}
 DIR=${PIHOLE_DIR:-/opt/pihole}
 cd "$DIR"
+# Registry login made by install.sh for a private package (root-only folder)
+if [ -d "$DIR/.docker" ]; then export DOCKER_CONFIG="$DIR/.docker"; fi
+REPO=${REPO:-$(sed -n 's/^PIHOLE_REPO=//p' .env 2>/dev/null || true)}
+if [ -z "$REPO" ]; then
+  echo "REPO is not set. Run: sudo REPO=owner/repo $0   (or run deploy/install.sh once)" >&2
+  exit 1
+fi
 
 out=$("$DIR/verify-release.sh" "$REPO" latest)
 new=$(tail -1 <<<"$out")
