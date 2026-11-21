@@ -30,18 +30,23 @@ Full test record: [docs/verification/VERIFICATION.md](docs/verification/VERIFICA
 
 ## Deploy on a Raspberry Pi
 
-One command sets everything up. From a clone of this repository:
+One command sets everything up:
 
 ```sh
-sudo bash deploy/install.sh
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/benheise/pihole-hardened/main/deploy/install.sh)"
 ```
 
-Or without cloning, after reading the script:
+That runs a script from the internet as root. To read it first, do the same in two steps:
 
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/benheise/pihole-hardened/main/deploy/install.sh
-sudo bash install.sh --repo benheise/pihole-hardened
+less install.sh
+sudo bash install.sh
 ```
+
+From a clone of this repository it is `sudo bash deploy/install.sh`. To answer every question with its default, append `install.sh --yes` to the one-line form, or `--yes` to the others.
+
+The one-line form downloads the whole script before running any of it, and runs nothing if the download fails. The shorter `curl ... | sudo bash` also works, but bash then executes the script while it is still arriving, so a dropped connection can run part of it.
 
 `deploy/install.sh` asks before each change it makes outside `/opt/pihole`. It:
 

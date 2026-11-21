@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Install pihole-hardened on this machine in one run.
 #
-#   sudo bash deploy/install.sh                      # from a clone of the repository
-#   sudo bash install.sh --repo benheise/pihole-hardened   # this file alone
+#   sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/benheise/pihole-hardened/main/deploy/install.sh)"
+#   sudo bash deploy/install.sh                         # from a clone of the repository
+#   sudo bash install.sh --repo benheise/pihole-hardened   # this file alone, another repository
 #
 # What it does, asking before every change outside its own folder:
 #   1. checks the platform, the machine's own DNS and port 53
