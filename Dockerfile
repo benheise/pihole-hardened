@@ -13,16 +13,18 @@
 #     without authentication, so upstream exposes those files to anyone who
 #     can reach the web port
 #   - the apk binary is removed, so ADDITIONAL_PACKAGES is not supported
-#   - all setuid/setgid bits are stripped (sudo and su are only ever called
-#     by root inside this image, so they still work without them)
+#   - all setuid/setgid bits are stripped (su is only ever called by root
+#     inside this image, so it still works without them; upstream's scripts
+#     drop privileges with setpriv)
 #   - tini runs as PID 1
 #   - base-layer packages are upgraded ("apk upgrade") at build time
 #   - no "# syntax=" line, so builds don't pull a mutable frontend image
-# The upstream startup scripts are used unchanged. The container starts as
+# The upstream startup scripts are used as they are, except for two patched
+# lines (scripts/patch-upstream.sh). The container starts as
 # root by design: start.sh sets file capabilities on pihole-FTL, then drops
 # to the "pihole" user with capsh before starting FTL.
 
-# Same digest upstream 2026.10.1 pins. To avoid Docker Hub pull limits in CI,
+# Same digest upstream 2026.11.0 pins. To avoid Docker Hub pull limits in CI,
 # the identical image is available as mirror.gcr.io/library/alpine@<same digest>
 # (digests are content addresses, so integrity is unchanged).
 # renovate: datasource=docker depName=docker.io/library/alpine
@@ -75,6 +77,12 @@ RUN set -eu; \
            web/.editorconfig web/.codespellignore web/README.md web/CONTRIBUTING.md \
            web/package.json web/package-lock.json web/xo.config.js web/postcss.config.js
 
+# Components no package scanner can see: the libraries compiled into the
+# static pihole-FTL binary and the JavaScript bundled with the web interface.
+# Recorded here, added to the SBOMs by scripts/sbom-add-pihole.py.
+RUN --mount=type=bind,source=scripts/embedded-components.sh,target=/tmp/embedded-components.sh \
+    sh /tmp/embedded-components.sh ./pihole-FTL web >> build-inputs.txt
+
 # ---------- runtime ----------
 FROM ${BASE_IMAGE}
 ARG PIHOLE_DOCKER_TAG=unknown
@@ -94,7 +102,7 @@ ENV FTL_CMD=no-daemon
 RUN apk upgrade --no-cache && \
     apk add --no-cache \
       bash bind-tools coreutils curl grep iproute2 jq libcap logrotate \
-      ncurses procps-ng psmisc setpriv shadow sudo tini tzdata
+      ncurses procps-ng psmisc setpriv shadow tini tzdata
 
 COPY --from=fetch /src/core /etc/.pihole
 COPY --from=fetch /src/web /var/www/html/admin
@@ -120,9 +128,15 @@ RUN set -eu; \
     adduser -S pihole -G pihole -u "${PIHOLE_UID}"
 WORKDIR /
 
-# Upstream startup scripts, unchanged, from the checkout of the release tag
+# Upstream startup scripts from the checkout of the release tag. Two lines are
+# patched, where root writes through a path the unprivileged pihole user
+# controls (the weekly gravity cron job's log redirect, and the creation of
+# adlists.list at start). scripts/patch-upstream.sh explains both; the smoke
+# test fails if root can be made to write through a planted symlink.
 COPY --chmod=0755 upstream/src/bash_functions.sh upstream/src/prefix-time.sh upstream/src/start.sh /usr/bin/
 COPY upstream/src/crontab.txt /crontab.txt
+RUN --mount=type=bind,source=scripts/patch-upstream.sh,target=/tmp/patch-upstream.sh \
+    sh /tmp/patch-upstream.sh /crontab.txt /usr/bin/bash_functions.sh
 # Stand-in for git: /opt/pihole/updatecheck.sh asks git for the local branch,
 # tag and commit of Core and Web. This answers from build-inputs.txt.
 COPY --chmod=0755 scripts/git-shim.sh /usr/bin/git

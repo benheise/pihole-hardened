@@ -36,6 +36,8 @@ jobs:
       - uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
         with:
           advanced-security: false
+      - name: Compose files differ only in the image
+        run: bash scripts/check-compose-parity.sh
       - name: Shell scripts
         run: shellcheck -S warning scripts/*.sh lab/*.sh lab/tests/*.sh deploy/*.sh
       - name: Dockerfile misconfiguration scan

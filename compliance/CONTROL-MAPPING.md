@@ -42,12 +42,12 @@ you've drawn it. Many organizations treat it as part of boundary protection
 
 | Risk area (§4) | Countermeasure (§5) | Implementation |
 |---|---|---|
-| 4.1.1 Image vulnerabilities | Scan images, block noncompliant images | Trivy and Grype gates on every platform; weekly rebuild; VEX for documented exceptions |
-| 4.1.2 Image configuration defects | Validate configuration, minimal images | hadolint and `trivy config` in CI; no package manager, no setuid binaries; build-only tools excluded |
+| 4.1.1 Image vulnerabilities | Scan images, block noncompliant images | Trivy and Grype gates on every platform; weekly rebuild; VEX for documented exceptions; libraries compiled into `pihole-FTL` and bundled JavaScript listed in the SBOMs, scanned at every release and triaged in `vex/EMBEDDED-TRIAGE.md` (informational, not a gate) |
+| 4.1.2 Image configuration defects | Validate configuration, minimal images | hadolint and `trivy config` in CI; no package manager, no setuid binaries; build-only tools excluded; repository metadata removed from the web root |
 | 4.1.3 Embedded malware | Trusted sources, scanning | Upstream inputs pinned by version and verified (FTL checksum, Alpine digest) |
 | 4.1.4 Embedded clear-text secrets | Keep secrets out of images | Admin password supplied at runtime from a secret file |
 | 4.1.5 Use of untrusted images | Only signed images from trusted sources | Keyless signatures and SLSA provenance; deploy by digest after `verify-release.sh` |
-| 4.2.1–4.2.3 Registry risks | Encrypted connections, prune stale images, access control | GHCR over TLS; images referenced by digest; GitHub access controls |
+| 4.2.1–4.2.3 Registry risks | Encrypted connections, prune stale images, access control | GHCR (and Docker Hub, when the optional copy is enabled) over TLS; images referenced by digest, and the digest and signatures are identical in both registries; GitHub access controls; the Docker Hub token is stored in the `production` environment, readable only by the publish job on `main` |
 | 4.4.3 Insecure container runtime configuration | Least privilege at runtime | `cap_drop: ALL` + 7 capabilities, `no-new-privileges`, PID and memory limits, non-root FTL |
 | 4.4.2 Unbounded network access | Limit exposure | Only DNS published to the LAN; admin UI on localhost |
 | 4.5 Host OS risks | Container-specific host OS, hardening | Out of scope: the Raspberry Pi host |
@@ -56,12 +56,12 @@ you've drawn it. Many organizations treat it as part of boundary protection
 
 | Practice | Implementation |
 |---|---|
-| PO.3 Implement supporting toolchains | Actions pinned to commit SHAs; StepSecurity Harden-Runner; Trivy installed from a version-pinned release whose tarball hash is pinned in `upstream.env` (reviewed by a person on every bump) |
+| PO.3 Implement supporting toolchains | Actions pinned to commit SHAs; StepSecurity Harden-Runner; Trivy and ORAS installed from version-pinned releases whose tarball hashes are pinned in `upstream.env` (reviewed by a person on every bump) |
 | PS.1 Protect all forms of code | Branch ruleset on `main`; required checks; PR-only changes |
 | PS.2 Provide a mechanism for verifying release integrity | Cosign keyless signatures on the image and the checksum manifest |
-| PS.3 Archive and protect each release | Immutable GitHub releases with SBOMs, provenance and scan results |
-| PW.4 Reuse existing, well-secured software | Upstream Pi-hole and Alpine pinned by version/digest; package drift check against upstream; every release records what each upstream tag resolved to, and the next release refuses to publish if a tag's content moved without its name changing (`scripts/check-upstream-drift.sh`) |
-| PW.7 / PW.8 Review and test | Lint gates; smoke test; functional parity lab (official vs. hardened) on amd64 and arm64 before every release |
+| PS.3 Archive and protect each release | GitHub releases with SBOMs, provenance and scan results, immutable when release immutability is enabled (`docs/SETUP.md` step 2); signed checksum manifest |
+| PW.4 Reuse existing, well-secured software | Upstream Pi-hole and Alpine pinned by version/digest; upstream code used unmodified except two patched lines in the startup scripts (`scripts/patch-upstream.sh`); package drift check against upstream; every release records what each upstream tag resolved to, and the next release refuses to publish if a tag's content moved without its name changing (`scripts/check-upstream-drift.sh`) |
+| PW.7 / PW.8 Review and test | Lint gates; smoke test; functional parity lab (official vs. hardened) on amd64 and arm64 before every release; manual security reviews with dynamic scanning and fuzzing recorded in `docs/verification/` (latest 2026-11-20) |
 | RV.1 Identify vulnerabilities on an ongoing basis | Weekly rebuild and scan; SARIF in GitHub code scanning; Renovate |
 | RV.2 Assess, prioritize and remediate | Gate on fixable HIGH/CRITICAL; reviewed OpenVEX statements for exceptions |
 | RV.3 Analyze root causes | Defects traced to upstream are reported upstream |

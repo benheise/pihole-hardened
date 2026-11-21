@@ -1,0 +1,136 @@
+# Pi-hole from the Docker Hub copy of pihole-hardened, with the same hardening
+# as deploy/docker-compose.yml. This file is self-contained: copy it to the
+# host as docker-compose.yml and start it. Nothing else from the repository
+# is needed.
+#
+#   mkdir -p /opt/pihole && cd /opt/pihole          # put this file here
+#   openssl rand -base64 24 > webpassword && chmod 600 webpassword
+#   docker compose up -d
+#   docker compose pull && docker compose up -d     # later: update by hand
+#
+# The image is the one the pipeline signs: Docker Hub holds the same digest as
+# GHCR, with its signatures and attestations. Pulling ":latest" trusts Docker
+# Hub and the tag, and updates only when you pull. For verified, automatic
+# updates use deploy/update.sh with IMAGE_REPO=docker.io/benheise/pihole-hardened
+# instead: it checks the signatures, pins the digest in .env (PIHOLE_IMAGE,
+# which this file honours) and rolls back an unhealthy update. To pin by hand:
+#   echo 'PIHOLE_IMAGE=docker.io/benheise/pihole-hardened@sha256:<digest>' > .env
+# (the digest is in each GitHub release's notes and image-digests.json).
+#
+# OWNER is the Docker Hub namespace; change it if it differs from the GitHub
+# account. Tags: latest, the upstream version (2026.10.1), and one per release
+# (2026.10.1-h42). Platforms: linux/amd64, linux/arm64, linux/arm/v7.
+#
+# Portainer or another web editor: the ./ paths below are relative to this
+# file's folder, which a pasted stack does not have. Use absolute paths on the
+# Docker host instead (for example /opt/pihole/webpassword and
+# /opt/pihole/etc-pihole)).
+#
+# Before first start, free port 53 on the host: set DNSStubListener=no in
+# /etc/systemd/resolved.conf and restart systemd-resolved.
+#
+# Everything below "image:" is kept identical to deploy/docker-compose.yml
+# (scripts/check-compose-parity.sh enforces it in CI); the reasons for each
+# setting are in the comments, which are the same in both files.
+services:
+  pihole:
+    image: ${PIHOLE_IMAGE:-docker.io/benheise/pihole-hardened:latest}
+    container_name: pihole
+    restart: unless-stopped
+    ports:
+      # Published ports bypass host firewalls such as ufw. To serve one
+      # interface only, prefix the LAN address: "192.168.1.2:53:53/udp".
+      - "53:53/tcp"
+      - "53:53/udp"
+      # Admin UI on localhost only. Before publishing it to the LAN, know that
+      # anyone who can reach this port can try passwords (about three guesses
+      # per second, no lockout), can keep you from logging in by flooding the
+      # login, and can make the UI unresponsive with ~50 idle connections.
+      # DNS keeps working through all of that. Use a long password, turn on
+      # 2FA (Settings > Web interface / API), and never publish port 80: the
+      # login also works over plain HTTP. See docs/verification/SECURITY-REVIEW-2026-11-20.md.
+      - "127.0.0.1:8443:443/tcp"
+    environment:
+      TZ: America/New_York
+      FTLCONF_dns_listeningMode: ALL   # required on bridge networks: queries arrive from the bridge IP
+      FTLCONF_database_maxDBdays: "30"
+      # Admin password from the secret below (upstream start.sh reads /run/secrets/<name>)
+      WEBPASSWORD_FILE: webpassword
+      # FTL's built-in NTP server and client are off: the client cannot set the
+      # clock without CAP_SYS_TIME (the host keeps time), and the server would
+      # be one more unauthenticated listener on the LAN. To run the NTP server,
+      # set ntp_ipv4_active to "true" and publish 123/udp.
+      FTLCONF_ntp_ipv4_active: "false"
+      FTLCONF_ntp_ipv6_active: "false"
+      FTLCONF_ntp_sync_active: "false"
+      # Defense in depth for the web root: the image already removes repository
+      # metadata, and this makes CivetWeb answer 404 for any dot-file or
+      # dot-directory, which FTL would otherwise serve before login.
+      FTLCONF_webserver_advancedOpts: "hide_files_patterns=**/.*"
+      # Don't keep login sessions across restarts. By default FTL saves the
+      # live session tokens, unencrypted, in pihole-FTL.db, so a copy or backup
+      # of ./etc-pihole would contain them. Cost: you log in again after a restart.
+      FTLCONF_webserver_session_restore: "false"
+      # Optional, off by default as upstream ships them:
+      #   FTLCONF_dns_dnssec: "true"      # validate DNSSEC; the upstream resolvers must support it
+      #   FTLCONF_misc_dnsmasq_lines: "stop-dns-rebind"   # drop upstream answers that point at
+      #                                   # private addresses (DNS rebinding); breaks split-horizon
+      #                                   # names that resolve to LAN addresses via the upstream
+      # Run FTL under a dedicated UID/GID. The default (1000) is usually the
+      # Pi's main login user, who would then own ./etc-pihole, including the
+      # query history and the admin password hash.
+      PIHOLE_UID: "1999"
+      PIHOLE_GID: "1999"
+    secrets:
+      - webpassword
+    volumes:
+      - ./etc-pihole:/etc/pihole
+
+    # Upstream's start.sh runs as root, sets file capabilities on pihole-FTL and
+    # starts FTL as the "pihole" user. Docker grants 14 capabilities by default;
+    # this keeps the 7 the image needs (each one was tested by removing it):
+    #   CHOWN, FOWNER     fix ownership/permissions of /etc/pihole and logs
+    #   DAC_OVERRIDE      root must rename pihole-owned logs during rotation;
+    #                     without it rotation fails silently and logs grow forever
+    #   SETUID, SETGID    drop to the pihole user (capsh, setpriv, su)
+    #   SETFCAP           start.sh applies setcap on every start; without it the
+    #                     container exits ("Unable to set capabilities")
+    #   KILL              stop FTL cleanly; without it shutdown waits 30s and
+    #                     FTL is SIGKILLed before flushing its database
+    # FTL itself ends up with no capabilities at all: no-new-privileges stops
+    # the file capabilities start.sh sets from taking effect, and FTL needs
+    # none of them for DNS on a bridge network.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SETFCAP, KILL]
+    # Safe on bridge networking: Docker sets net.ipv4.ip_unprivileged_port_start=0
+    # in the container, so FTL binds port 53 with no capabilities at all.
+    security_opt:
+      - no-new-privileges:true
+    # Must stay false: start.sh writes a capability xattr onto /usr/bin/pihole-FTL
+    # at every start, which fails on a read-only root filesystem.
+    read_only: false
+    tmpfs:
+      - /tmp:size=64m
+    pids_limit: 256
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+secrets:
+  webpassword:
+    file: ./webpassword
+
+# DHCP variant (lab-tested: lab/LAB-PLAN.md V04, V07-V09; physical-LAN reach not tested):
+#   network_mode: host            # DHCP needs broadcast on the LAN; remove "ports:"
+#   cap_add: add NET_BIND_SERVICE, NET_ADMIN and NET_RAW
+#   security_opt: remove no-new-privileges. FTL runs as the pihole user and
+#     gets its capabilities from file capabilities, which no-new-privileges
+#     blocks. With it, dnsmasq refuses DHCP ("missing required capability
+#     NET_ADMIN") and, on host networking, FTL cannot bind port 53 (the host's
+#     unprivileged-port floor is 1024).
+#   environment: FTLCONF_dhcp_active: "true" plus your dhcp.* settings
+#   WARNING (upstream behavior, both images): if DHCP is enabled but NET_ADMIN
+#   is missing, FTL stops on a config error and DNS goes down too. start.sh's
+#   "DHCP will not be started" fallback can't turn DHCP off when it was enabled
+#   through an FTLCONF_ variable, because that makes the setting read-only.
