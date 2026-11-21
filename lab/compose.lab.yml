@@ -1,0 +1,106 @@
+# Lab topology from LAB-PLAN.md. Started and driven by lab/run-lab.sh.
+name: pihole-lab
+
+x-pihole-env: &pihole-env
+  TZ: UTC
+  FTLCONF_webserver_api_password: lab-password
+  FTLCONF_dns_listeningMode: ALL
+  FTLCONF_dns_upstreams: 172.30.0.10
+  FTLCONF_database_DBinterval: "5"
+  FTLCONF_ntp_sync_active: "false"
+  FTLCONF_ntp_ipv6_active: "false"
+
+# Same settings as deploy/docker-compose.yml
+x-hardening: &hardening
+  cap_drop: [ALL]
+  cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SETFCAP, KILL]
+  security_opt: ["no-new-privileges:true"]
+  read_only: false
+  tmpfs: ["/tmp:size=64m"]
+  pids_limit: 256
+  mem_limit: 512m
+
+x-helper: &helper
+  image: pihole-lab-helper
+  command: ["sleep", "infinity"]
+  init: true
+
+networks:
+  lab:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          ip_range: 172.30.0.0/25
+          gateway: 172.30.0.1
+  # DHCP variants only. Not internal: Docker's isolation rules for internal
+  # networks drop packets from 0.0.0.0, which is where DHCP DISCOVERs come from.
+  dhcp:
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24
+          ip_range: 172.31.0.0/25
+          gateway: 172.31.0.1
+
+volumes:
+  control-etc:
+  subject-etc:
+
+services:
+  upstream-dns:
+    <<: *helper
+    container_name: lab-upstream-dns
+    command: ["dnsmasq", "-k", "--conf-file=/etc/lab/upstream-dnsmasq.conf"]
+    volumes: ["./config:/etc/lab:ro"]
+    networks: {lab: {ipv4_address: 172.30.0.10}}
+
+  lists:
+    <<: *helper
+    container_name: lab-lists
+    command: ["python3", "-m", "http.server", "80", "--directory", "/srv/lists"]
+    volumes: ["./config/lists:/srv/lists:ro"]
+    networks: {lab: {ipv4_address: 172.30.0.11}}
+
+  client-a:
+    <<: *helper
+    container_name: lab-client-a
+    networks: {lab: {ipv4_address: 172.30.0.21}}
+
+  client-b:
+    <<: *helper
+    container_name: lab-client-b
+    networks: {lab: {ipv4_address: 172.30.0.22}}
+
+  client-c:
+    <<: *helper
+    container_name: lab-client-c
+    networks: {lab: {ipv4_address: 172.30.0.23}}
+
+  admin:
+    <<: *helper
+    container_name: lab-admin
+    networks:
+      lab: {ipv4_address: 172.30.0.24}
+      dhcp: {ipv4_address: 172.31.0.24}
+
+  pihole-control:
+    image: ${CONTROL_IMAGE:?set CONTROL_IMAGE}
+    container_name: lab-pihole-control
+    environment: *pihole-env
+    dns: [172.30.0.10]
+    volumes: ["control-etc:/etc/pihole"]
+    networks: {lab: {ipv4_address: 172.30.0.53}}
+    depends_on: [upstream-dns, lists]
+
+  pihole-subject:
+    <<: *hardening
+    image: ${SUBJECT_IMAGE:?set SUBJECT_IMAGE}
+    container_name: lab-pihole-subject
+    environment:
+      <<: *pihole-env
+      PIHOLE_UID: "1999"
+      PIHOLE_GID: "1999"
+    dns: [172.30.0.10]
+    volumes: ["subject-etc:/etc/pihole"]
+    networks: {lab: {ipv4_address: 172.30.0.54}}
+    depends_on: [upstream-dns, lists]

@@ -1,0 +1,7 @@
+# DL3018 (pin apk package versions) is ignored on purpose. The weekly rebuild
+# relies on "apk upgrade" / "apk add" pulling the latest patched packages from
+# the digest-pinned Alpine release, and Alpine removes superseded versions
+# from its repositories, so version pins would break builds without adding
+# reproducibility. The SBOM attached to each release records exact versions.
+ignored:
+  - DL3018

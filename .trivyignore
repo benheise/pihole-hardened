@@ -1,0 +1,10 @@
+# Every entry needs a reason and an expiry date. An expired entry fails the
+# scan gate, which forces a re-review.
+
+# DS-0002: no USER instruction. Deliberate: upstream's start.sh must start as
+# root to set file capabilities on pihole-FTL, run crond and adjust ownership,
+# then it starts FTL as the "pihole" user via capsh. Compensating controls:
+# cap_drop ALL with 7 capabilities added back, no-new-privileges, no setuid
+# binaries, no package manager (see deploy/docker-compose.yml and
+# scripts/smoke-test.sh). Re-review when upstream supports a non-root start.
+DS-0002 exp:2027-05-08

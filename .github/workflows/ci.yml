@@ -1,0 +1,97 @@
+name: ci
+
+# Required status checks for main. Renovate's automerge depends on these, so
+# an upstream bump only merges if the image builds, every runtime path works
+# under production hardening, and nothing HIGH/CRITICAL and fixable remains.
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # checkout
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: upstream.env format
+        run: bash scripts/upstream-env.sh >/dev/null
+      - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: Dockerfile
+          config: .hadolint.yaml
+      - uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          advanced-security: false
+      - name: Shell scripts
+        run: shellcheck -S warning scripts/*.sh lab/*.sh lab/tests/*.sh deploy/*.sh
+      - name: Dockerfile misconfiguration scan
+        run: |
+          bash scripts/install-trivy.sh
+          trivy config --skip-dirs upstream --severity HIGH,CRITICAL --exit-code 1 .
+
+  smoke:
+    name: smoke (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read # checkout
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out upstream docker-pi-hole at the pinned tag
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source <(bash scripts/upstream-env.sh)
+          git clone -q --depth 1 --branch "$PIHOLE_DOCKER_TAG" \
+            https://github.com/pi-hole/docker-pi-hole.git upstream
+
+      - name: Upstream package drift
+        run: bash scripts/check-upstream-packages.sh
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source <(bash scripts/upstream-env.sh)
+          docker build -t pihole-hardened:ci \
+            --build-arg FTL_VERSION="$FTL_VERSION" \
+            --build-arg CORE_VERSION="$CORE_VERSION" \
+            --build-arg WEB_VERSION="$WEB_VERSION" \
+            --build-arg PIHOLE_DOCKER_TAG="$PIHOLE_DOCKER_TAG" \
+            --build-arg PIHOLE_DOCKER_COMMIT="$(git -C upstream rev-parse HEAD)" \
+            --build-arg VCS_REF="$GITHUB_SHA" .
+
+      - name: Smoke test under production hardening
+        run: bash scripts/smoke-test.sh pihole-hardened:ci
+
+      - name: Vulnerability gate
+        run: |
+          bash scripts/install-trivy.sh
+          trivy image --scanners vuln --vex vex/pihole.openvex.json --ignorefile .trivyignore \
+            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 pihole-hardened:ci

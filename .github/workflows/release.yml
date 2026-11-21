@@ -1,0 +1,367 @@
+name: release
+
+# Hands-free release: Renovate merges an upstream bump (after ci.yml passes),
+# or the weekly schedule rebuilds to pick up Alpine security fixes. Every run
+# builds, signs, scans, lab-tests and only then publishes: tags on GHCR, the
+# same signed image on Docker Hub (when the DOCKERHUB_IMAGE variable is set,
+# see docs/SETUP.md), and a release with its compliance bundle. A failure
+# opens (or updates) an issue instead.
+on:
+  push:
+    branches: [main]
+    paths:
+      - upstream.env
+      - Dockerfile
+      - .trivyignore
+      - "vex/**"
+      - "scripts/**"
+      - "lab/**"
+      - "compliance/**"
+      - .github/workflows/build.yml
+      - .github/workflows/release.yml
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: resolve versions
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # checkout
+    outputs:
+      image: ${{ steps.v.outputs.image }}
+      docker_tag: ${{ steps.v.outputs.docker_tag }}
+      version: ${{ steps.v.outputs.version }}
+      build_args: ${{ steps.v.outputs.build_args }}
+      source_date_epoch: ${{ steps.v.outputs.source_date_epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: v
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source <(bash scripts/upstream-env.sh)
+          sde=$(git log -1 --format=%ct)
+          {
+            echo "image=ghcr.io/${REPO,,}"
+            echo "docker_tag=$PIHOLE_DOCKER_TAG"
+            echo "version=${PIHOLE_DOCKER_TAG}-h${GITHUB_RUN_NUMBER}"
+            echo "source_date_epoch=$sde"
+            echo "build_args<<EOF"
+            echo "FTL_VERSION=$FTL_VERSION"
+            echo "CORE_VERSION=$CORE_VERSION"
+            echo "WEB_VERSION=$WEB_VERSION"
+            echo "PIHOLE_DOCKER_TAG=$PIHOLE_DOCKER_TAG"
+            echo "VCS_REF=$GITHUB_SHA"
+            echo "BUILD_DATE=$(date -u -d "@$sde" +%FT%TZ)"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build
+    needs: resolve
+    permissions: # the called workflow can't use more than this
+      contents: read # checkout
+      packages: write # push images to GHCR
+      id-token: write # keyless signing and provenance
+      attestations: write # store provenance
+    # "./" resolves to the running commit for reusable workflows. GitHub's newer
+    # "$/" syntax is equivalent here, but actionlint 1.7.12 doesn't accept it yet.
+    uses: ./.github/workflows/build.yml # zizmor: ignore[self-repository]
+    with:
+      image: ${{ needs.resolve.outputs.image }}
+      docker_tag: ${{ needs.resolve.outputs.docker_tag }}
+      build_args: ${{ needs.resolve.outputs.build_args }}
+      source_date_epoch: ${{ needs.resolve.outputs.source_date_epoch }}
+      build_tag: build-${{ github.run_number }}
+
+  scan:
+    name: scan (${{ matrix.platform }})
+    needs: [resolve, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64, linux/arm/v7]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # checkout
+      packages: write # cosign attest pushes attestations to GHCR
+      id-token: write # keyless signing of the attestations
+      security-events: write # SARIF upload to code scanning
+    env:
+      IMAGE: ${{ needs.resolve.outputs.image }}
+      INDEX_DIGEST: ${{ needs.build.outputs.digest }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+      - name: Install Trivy (checksum-verified)
+        run: bash scripts/install-trivy.sh
+
+      - name: Resolve the platform digest
+        id: p
+        run: |
+          set -euo pipefail
+          key=$(tr / - <<<"$PLATFORM")
+          digest=$(docker buildx imagetools inspect "$IMAGE@$INDEX_DIGEST" --raw | jq -r --arg p "$PLATFORM" \
+            '.manifests[] | select((.platform.os + "/" + .platform.architecture
+              + (if .platform.variant then "/" + .platform.variant else "" end)) == $p) | .digest')
+          [ -n "$digest" ] || { echo "::error::no manifest for $PLATFORM"; exit 1; }
+          mkdir -p out
+          echo "$PLATFORM $digest" > "out/platform-$key.txt"
+          { echo "key=$key"; echo "digest=$digest"; } >> "$GITHUB_OUTPUT"
+
+      - name: Reports and SBOMs
+        run: bash scripts/scan-image.sh "$IMAGE@$INDEX_DIGEST" "$PLATFORM" out
+
+      - name: Gate (Trivy) - fail on fixable HIGH/CRITICAL
+        run: |
+          trivy image --quiet --platform "$PLATFORM" --scanners vuln --skip-db-update \
+            --vex vex/pihole.openvex.json --ignorefile .trivyignore \
+            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE@$INDEX_DIGEST"
+
+      - name: Gate (Grype) - second opinion
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.p.outputs.digest }}
+          vex: vex/pihole.openvex.json
+          fail-build: true
+          severity-cutoff: high
+          only-fixed: true
+          output-format: json
+          output-file: out/grype-${{ steps.p.outputs.key }}.json
+
+      - name: Attest SBOMs, vulnerability scan and VEX to the platform image
+        env:
+          KEY: ${{ steps.p.outputs.key }}
+          DIGEST: ${{ steps.p.outputs.digest }}
+        run: |
+          set -euo pipefail
+          ref="$IMAGE@$DIGEST"
+          cosign attest --yes --type spdxjson --predicate "out/sbom-$KEY.spdx.json" "$ref"
+          cosign attest --yes --type cyclonedx --predicate "out/sbom-$KEY.cdx.json" "$ref"
+          cosign attest --yes --type vuln --predicate "out/vuln-$KEY.cosign.json" "$ref"
+          cosign attest --yes --type openvex --predicate vex/pihole.openvex.json "$ref"
+
+      - name: Upload SARIF to code scanning
+        if: always() && hashFiles(format('out/trivy-{0}.sarif', steps.p.outputs.key)) != ''
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: out/trivy-${{ steps.p.outputs.key }}.sarif
+          category: trivy-${{ steps.p.outputs.key }}
+
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-${{ steps.p.outputs.key }}
+          path: out/
+          retention-days: 30
+
+  lab:
+    name: lab (${{ matrix.arch }})
+    needs: [resolve, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read # checkout
+      packages: read # pull the built image
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Functional parity lab against the built image
+        env:
+          SUBJECT_IMAGE: ${{ needs.resolve.outputs.image }}@${{ needs.build.outputs.digest }}
+          CONTROL_IMAGE: docker.io/pihole/pihole:${{ needs.resolve.outputs.docker_tag }}
+        run: bash lab/run-lab.sh
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lab-${{ matrix.arch }}
+          path: lab/results/
+          retention-days: 30
+
+  publish:
+    name: publish release
+    needs: [resolve, build, scan, lab]
+    runs-on: ubuntu-24.04
+    environment: production
+    permissions:
+      contents: write # create the release
+      packages: write # add release tags
+      id-token: write # sign SHA256SUMS; Docker Hub OIDC login when configured
+      attestations: read # download provenance for the bundle
+    env:
+      IMAGE: ${{ needs.resolve.outputs.image }}
+      DIGEST: ${{ needs.build.outputs.digest }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      DOCKER_TAG: ${{ needs.resolve.outputs.docker_tag }}
+      REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      # Docker Hub repository as "namespace/name"; empty disables the mirror
+      DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+      # Recorded in the signed image-digests.json so verify-release.sh accepts it
+      MIRROR_IMAGES: ${{ vars.DOCKERHUB_IMAGE != '' && format('docker.io/{0}', vars.DOCKERHUB_IMAGE) || '' }}
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: scan-*
+          merge-multiple: true
+          path: artifacts/scan
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: lab-*
+          path: artifacts/lab
+
+      # Upstream tags and the FTL release asset are mutable. Refuse to publish
+      # if one of them changed content without changing its name since the
+      # previous release (a version bump through a PR is fine).
+      - name: Upstream reference drift gate
+        run: bash scripts/check-upstream-drift.sh artifacts/scan
+
+      # ---- Docker Hub mirror: every step below marked "Docker Hub" is skipped
+      # unless the repository variable DOCKERHUB_IMAGE is set. The image is
+      # copied only now, after the scan, lab and drift gates have passed. ----
+      - name: Docker Hub - log in (access token)
+        if: vars.DOCKERHUB_IMAGE != '' && vars.DOCKERHUB_OIDC_CONNECTION_ID == ''
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Docker organizations on a paid plan can replace the stored token with a
+      # short-lived one: set DOCKERHUB_OIDC_CONNECTION_ID and delete the secret.
+      - name: Docker Hub - log in (OIDC connection)
+        if: vars.DOCKERHUB_IMAGE != '' && vars.DOCKERHUB_OIDC_CONNECTION_ID != ''
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+        env:
+          DOCKERHUB_OIDC_CONNECTIONID: ${{ vars.DOCKERHUB_OIDC_CONNECTION_ID }}
+
+      # First under the unique version tag only, so nothing a consumer pulls
+      # ("latest") moves on either registry until both hold the verified image.
+      - name: Docker Hub - copy the signed image with its signatures and attestations
+        if: vars.DOCKERHUB_IMAGE != ''
+        run: |
+          set -euo pipefail
+          [[ "$DOCKERHUB_IMAGE" =~ ^[a-z0-9]+([._-][a-z0-9]+)*/[a-z0-9]+([._-][a-z0-9]+)*$ ]] \
+            || { echo "::error::DOCKERHUB_IMAGE must look like namespace/name, got '$DOCKERHUB_IMAGE'"; exit 1; }
+          bash scripts/install-oras.sh
+          bash scripts/mirror-image.sh "$IMAGE" "$DIGEST" "docker.io/$DOCKERHUB_IMAGE" "$VERSION"
+
+      - name: Docker Hub - verify signature and attestations on the copy
+        if: vars.DOCKERHUB_IMAGE != ''
+        env:
+          W: ${{ github.server_url }}/${{ github.repository }}/.github/workflows
+          ISS: https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+          hub="docker.io/$DOCKERHUB_IMAGE"
+          cosign verify "$hub@$DIGEST" --certificate-identity "$W/build.yml@refs/heads/main" \
+            --certificate-oidc-issuer "$ISS" >/dev/null
+          for f in artifacts/scan/platform-*.txt; do
+            read -r plat pdig <"$f"
+            for t in spdxjson cyclonedx vuln openvex; do
+              cosign verify-attestation --type "$t" "$hub@$pdig" \
+                --certificate-identity "$W/release.yml@refs/heads/main" --certificate-oidc-issuer "$ISS" >/dev/null
+            done
+            echo "ok  $plat: 4 attestations verify on Docker Hub"
+          done
+
+      - name: Tag the signed index
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create -t "$IMAGE:$VERSION" -t "$IMAGE:$DOCKER_TAG" -t "$IMAGE:latest" "$IMAGE@$DIGEST"
+          for t in "$VERSION" "$DOCKER_TAG" latest; do
+            got=$(docker buildx imagetools inspect "$IMAGE:$t" --format '{{json .Manifest}}' | jq -r .digest)
+            [ "$got" = "$DIGEST" ] || { echo "::error::$IMAGE:$t is $got, not the signed $DIGEST"; exit 1; }
+          done
+
+      - name: Docker Hub - move the upstream-version and latest tags
+        if: vars.DOCKERHUB_IMAGE != ''
+        run: bash scripts/mirror-image.sh "$IMAGE" "$DIGEST" "docker.io/$DOCKERHUB_IMAGE" "$DOCKER_TAG" latest
+
+      - name: Build the compliance bundle
+        run: bash scripts/build-compliance-bundle.sh artifacts dist
+
+      - name: Sign the checksum manifest (keyless)
+        run: cosign sign-blob --yes --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
+
+      - name: Publish the release
+        run: |
+          gh release create "$VERSION" dist/* --repo "$REPO" --target "$GITHUB_SHA" \
+            --title "pihole-hardened $VERSION" --notes-file dist/RELEASE-NOTES.md
+
+  notify:
+    name: report failure
+    needs: [resolve, build, scan, lab, publish]
+    if: failure()
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write # open or comment on the failure issue
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open or update the release-failure issue
+        run: |
+          set -euo pipefail
+          title="Release pipeline failing"
+          n=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --body "Failed again: $RUN_URL"
+          else
+            gh issue create --title "$title" --body "Release run failed: $RUN_URL
+
+          Nothing was published. Check the failed job; scan and lab reports are attached to the run as artifacts."
+          fi

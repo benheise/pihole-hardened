@@ -1,0 +1,41 @@
+[Unit]
+Description=Verify and apply the latest pihole-hardened release
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Set to your GitHub owner/repo
+Environment=REPO=benheise/pihole-hardened
+Environment=PIHOLE_DIR=/opt/pihole
+# Uncomment to pull from Docker Hub instead of GHCR (same signed image)
+#Environment=IMAGE_REPO=docker.io/benheise/pihole-hardened
+# cosign keeps its Sigstore trust root cache under $HOME
+Environment=HOME=/var/lib/pihole-update
+StateDirectory=pihole-update
+ExecStart=/opt/pihole/update.sh
+TimeoutStartSec=20min
+
+# The script only needs the Docker socket, its own directory and the network.
+# (Sandboxing options a Raspberry Pi OS systemd supports; check with
+# "systemd-analyze security pihole-update.service".)
+ProtectSystem=strict
+ReadWritePaths=/opt/pihole
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+CapabilityBoundingSet=

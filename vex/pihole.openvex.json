@@ -1,0 +1,8 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://openvex.dev/docs/public/vex-9b6edde26a5131777ad46b2faa381df98c16b59d4754f166fd5f23f3b05d3ee9",
+  "author": "pihole-hardened maintainers",
+  "timestamp": "2026-11-08T00:00:00Z",
+  "version": 1,
+  "statements": []
+}

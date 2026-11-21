@@ -1,0 +1,62 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:best-practices"],
+  "description": "Keeps upstream Pi-hole versions, the Alpine base digest, GitHub Actions SHAs, Trivy and ORAS current. Merges happen only after the required ci checks pass; release.yml then builds and publishes.",
+  "platformAutomerge": true,
+  "minimumReleaseAge": "3 days",
+  "labels": ["dependencies"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Versions in upstream.env",
+      "managerFilePatterns": ["/^upstream\\.env$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\n[A-Z_]+=(?<currentValue>\\S+)"
+      ],
+      "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}"
+    },
+    {
+      "customType": "regex",
+      "description": "Digest-pinned base images in ARG BASE_IMAGE lines",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nARG BASE_IMAGE=\\S+?:(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ]
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Pi-hole releases: one grouped PR, merged once CI passes",
+      "matchDepNames": ["pi-hole/docker-pi-hole", "pi-hole/FTL", "pi-hole/pi-hole", "pi-hole/web"],
+      "groupName": "Pi-hole upstream",
+      "minimumReleaseAge": "1 day",
+      "automerge": true
+    },
+    {
+      "description": "Alpine base: patch releases and digest refreshes merge automatically",
+      "matchDepNames": ["docker.io/library/alpine"],
+      "matchUpdateTypes": ["patch", "digest"],
+      "automerge": true
+    },
+    {
+      "description": "GitHub Actions: non-major updates merge automatically",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest", "pinDigest"],
+      "automerge": true
+    },
+    {
+      "description": "Trivy: tags were hijacked in March 2026 (0.69.4 malicious). Long cooldown and human review.",
+      "matchDepNames": ["aquasecurity/trivy"],
+      "extractVersion": "^v(?<version>.+)$",
+      "minimumReleaseAge": "7 days",
+      "automerge": false
+    },
+    {
+      "description": "ORAS (copies the image to Docker Hub): tarball hashes in upstream.env are updated by a reviewer.",
+      "matchDepNames": ["oras-project/oras"],
+      "extractVersion": "^v(?<version>.+)$",
+      "minimumReleaseAge": "7 days",
+      "automerge": false
+    }
+  ]
+}

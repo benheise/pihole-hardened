@@ -1,0 +1,2 @@
+# Lab allowlist (antigravity): overrides the blocklists
+antigravity.lab.example

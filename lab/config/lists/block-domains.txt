@@ -1,0 +1,6 @@
+# Lab blocklist: one domain per line (exact matches only)
+plain-list.lab.example
+exact-only.lab.example
+allowme.lab.example
+antigravity.lab.example
+ads.lab.example

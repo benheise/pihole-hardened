@@ -1,0 +1,3 @@
+[Adblock Plus]
+! Lab blocklist: ABP format (covers subdomains)
+||abp-parent.lab.example^

@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily check for a new pihole-hardened release
+
+[Timer]
+# DNS is briefly unavailable while the container is replaced, so run at a quiet hour
+OnCalendar=*-*-* 04:30
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
