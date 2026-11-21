@@ -268,3 +268,49 @@ What this does and does not confirm:
 - Deployment through Portainer needed absolute paths in place of
   `./webpassword` and `./etc-pihole` and a literal image reference; the README
   and the compose files now say so.
+
+## Second release on GitHub (2026-11-21)
+
+`2026.11.0-h2` (`ghcr.io/benheise/pihole-hardened@sha256:32d04d8a…1a3a`,
+workflow run 44926814756, commit `73110df`), built from the current tree
+through a pull request. Read from the published release assets:
+
+| Item | Result |
+|---|---|
+| CI on the pull request | `lint`, `smoke (amd64)` and `smoke (arm64)` passed: first run on GitHub of the 13-check smoke test (including the root-write test) and the compose-parity check |
+| Upstream inputs | docker-pi-hole 2026.11.0, FTL v6.9, Core v6.6, Web v6.6.1; `scripts/patch-upstream.sh` applied at build |
+| Scan gates | Trivy and Grype: 0 findings on all three platforms |
+| Embedded-component scan | Ran on all three platforms and did not block. The report lists 8 matches (7 CVE IDs), the same set triaged in `vex/EMBEDDED-TRIAGE.md`. The step raises a warning annotation ("Failed minimum severity level") on each scan job; that is Grype's wording for "found something", not a failure |
+| SBOM | 33 embedded components recorded in `build-inputs-*.txt` and present in the CycloneDX SBOM with CPEs (checked on arm64) |
+| Upstream drift gate | Passed against the previous release (a version bump) |
+| Lab, amd64 and arm64 | PASS on both: core 40/40, parity 40/40, posture 7/7, variants 7 pass and 2 skipped |
+| Bundle | 34 files in `SHA256SUMS`; the seven downloaded for this check match |
+
+Still not exercised: the Docker Hub copy, Renovate, the Pi-side updater, and
+signature verification from an independent machine.
+
+## Installer (2026-11-21)
+
+`deploy/install.sh` was written after the first real deployments needed too
+many manual steps (file copies, a missing `cosign`, a host that used itself
+for DNS, relative paths in Portainer). Tested on amd64 in a container host
+with Docker 29.9 and compose 5.7, against the published `2026.11.0-h2`:
+
+| Case | Result |
+|---|---|
+| Fresh machine, run from a clone, `--yes` | Installed a missing package with apt, wrote the files, started the verified digest, healthy; admin login works with the generated password |
+| Run again on the same machine | Kept the password, data and override file; `update.sh` reported "up to date" |
+| `update.sh` with no arguments afterwards | Works: reads the repository name the installer stored in `.env` |
+| Existing `pihole/pihole:2026.10.1` container with data and password elsewhere | Replaced; data moved to `/opt/pihole/etc-pihole`, a custom DNS record and the old password still valid afterwards |
+| Existing container that kept its data only inside the container | Data copied out to `/opt/pihole/etc-pihole`; custom DNS record still present |
+| Answer "n" to the replace question at a terminal | Stopped; existing container untouched |
+| New container cannot start (port 8443 held by another process) | Old container and its data put back, installer exits with an error |
+| Script alone, no clone, `--repo` given | Fetched the deployment files at the latest release tag and installed |
+| Script alone, no `--repo` | Stops and asks for it |
+
+Not tested: the signature checks inside this run (a stand-in for `cosign`
+was used, because the test host cannot reach Sigstore or download cosign);
+the cosign and Docker installation steps; the NetworkManager and
+systemd-resolved fixes; the registry login for a private package; the
+systemd timer; ARM. `scripts/verify-release.sh` now names a missing or outdated
+`cosign` and prints cosign's own error instead of "SHA256SUMS signature".

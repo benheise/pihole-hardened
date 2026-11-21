@@ -28,6 +28,17 @@ else base="https://github.com/$REPO/releases/download/$V"; fi
 log() { echo "$*" >&2; }
 fail() { log "FAILED: $*"; exit 1; }
 
+# Say plainly when a tool is missing or too old: otherwise the first check
+# fails with "SHA256SUMS signature", which reads like a bad release.
+for t in cosign curl jq sha256sum; do
+  command -v "$t" >/dev/null 2>&1 || fail "$t is not installed (or not on root's PATH when run with sudo)"
+done
+cv=$(cosign version 2>/dev/null | sed -n 's/^GitVersion:[[:space:]]*v\{0,1\}//p')
+case "$cv" in
+  [3-9].* | [1-9][0-9].*) ;;
+  *) fail "cosign 3.x or newer is required, found '${cv:-unknown}' (releases are signed in cosign 3's bundle format)" ;;
+esac
+
 d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
 cd "$d"
 for f in SHA256SUMS SHA256SUMS.sigstore.json image-digests.json; do
@@ -36,7 +47,7 @@ done
 
 cosign verify-blob --bundle SHA256SUMS.sigstore.json \
   --certificate-identity "$W/release.yml@refs/heads/main" --certificate-oidc-issuer "$ISS" \
-  SHA256SUMS >/dev/null 2>&1 || fail "SHA256SUMS signature"
+  SHA256SUMS >/dev/null 2>cosign.err || { tail -5 cosign.err >&2; fail "SHA256SUMS signature (cosign's message is above)"; }
 log "ok  SHA256SUMS signed by $REPO release workflow"
 
 grep ' image-digests.json$' SHA256SUMS | sha256sum -c - >/dev/null 2>&1 || fail "image-digests.json checksum"

@@ -6,7 +6,7 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
-# Set to your GitHub owner/repo
+# Set to your GitHub owner/repo (deploy/install.sh fills this in)
 Environment=REPO=benheise/pihole-hardened
 Environment=PIHOLE_DIR=/opt/pihole
 # Uncomment to pull from Docker Hub instead of GHCR (same signed image)

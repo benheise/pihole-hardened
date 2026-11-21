@@ -3,7 +3,8 @@
 # capabilities, security options, limits and FTL settings as this file
 # (not the time zone, database retention, published ports or log options).
 #
-# Before first start:
+# deploy/install.sh sets all of this up (sudo bash deploy/install.sh). By hand,
+# before first start:
 #   - set PIHOLE_IMAGE in .env to a verified digest (deploy/update.sh does this)
 #   - write the admin password to ./webpassword (one line, chmod 600). It is
 #     mounted as a Docker secret and read by start.sh, so it never appears in

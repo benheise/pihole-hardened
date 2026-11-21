@@ -30,24 +30,58 @@ Full test record: [docs/verification/VERIFICATION.md](docs/verification/VERIFICA
 
 ## Deploy on a Raspberry Pi
 
-Prerequisites on the Pi: Docker with Compose v2, plus `cosign` 3.x, `curl` and `jq`. Port 53 must be free; on Debian or Ubuntu hosts, set `DNSStubListener=no` in `/etc/systemd/resolved.conf`.
+One command sets everything up. From a clone of this repository:
+
+```sh
+sudo bash deploy/install.sh
+```
+
+Or without cloning, after reading the script:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/benheise/pihole-hardened/main/deploy/install.sh
+sudo bash install.sh --repo benheise/pihole-hardened
+```
+
+`deploy/install.sh` asks before each change it makes outside `/opt/pihole`. It:
+
+- checks the machine's own DNS and port 53, and offers to fix a machine that uses itself as its DNS server or has systemd-resolved's stub listener on the port;
+- installs what is missing: `curl`, `jq`, `openssl`, `iproute2`, Docker with the compose plugin, and `cosign` 3.x (checked against its published checksums);
+- puts the compose file, `update.sh` and `verify-release.sh` in `/opt/pihole`, generates the admin password file, and writes the machine's time zone to `docker-compose.override.yml`;
+- checks that the image can be pulled, and offers a registry login if the GHCR package is still private (`docs/SETUP.md` step 5);
+- verifies the signed release, pulls it, starts Pi-hole and waits until it is healthy;
+- installs the nightly update timer.
+
+If a container named `pihole` already runs on the machine (a Portainer stack, or the official image), the installer replaces it and takes over its data folder and password. The old container is removed only after the new one is healthy, and is put back if it is not. Run with `--yes` to accept every default without questions; `--help` lists the options. Running it again is safe: it keeps the password, the data and the override file.
+
+Afterwards `sudo /opt/pihole/update.sh` updates by hand, and local changes (ports, DHCP, extra settings) belong in `/opt/pihole/docker-compose.override.yml`, which updates never overwrite.
+
+<details>
+<summary>Manual setup, if you prefer to do each step yourself</summary>
+
+Prerequisites on the Pi: Docker with Compose v2, plus `cosign` 3.x, `curl` and `jq`. Port 53 must be free; on Debian or Ubuntu hosts, set `DNSStubListener=no` in `/etc/systemd/resolved.conf`. The machine must not depend on its own Pi-hole for DNS, or the first image pull fails.
 
 ```sh
 sudo mkdir -p /opt/pihole && cd /opt/pihole
-REPO=benheise/pihole-hardened   # this repository
 # copy deploy/docker-compose.yml, deploy/update.sh and scripts/verify-release.sh here
 openssl rand -base64 24 | sudo tee webpassword >/dev/null   # admin password, mounted as a Docker secret
 sudo chmod 600 webpassword
-sudo REPO=$REPO ./update.sh        # verifies the latest release, writes .env, starts Pi-hole
+sudo REPO=benheise/pihole-hardened ./update.sh   # verifies the latest release, writes .env, starts Pi-hole
 ```
 
-**Quick start from Docker Hub.** [deploy/docker-compose.dockerhub.yml](deploy/docker-compose.dockerhub.yml) is self-contained and carries the same hardening: copy that one file to the host as `docker-compose.yml`, write the `webpassword` file as above, and run `docker compose up -d`. It pulls `docker.io/benheise/pihole-hardened:latest`, which trusts the tag and updates only when you run `docker compose pull`. The steps above verify signatures and pin the digest, and they work with Docker Hub too: add `IMAGE_REPO=docker.io/benheise/pihole-hardened` to the `update.sh` command.
+To update automatically, install `deploy/pihole-update.service` and `deploy/pihole-update.timer`: set `REPO=` in the service, then run `systemctl enable --now pihole-update.timer`.
 
-To update automatically, install `deploy/pihole-update.service` and `deploy/pihole-update.timer`: set `REPO=` in the service, then run `systemctl enable --now pihole-update.timer`. Each run verifies the newest release and switches to its digest. If the new container isn't healthy within five minutes, it rolls back. It refuses to move to an older release than the one running (`ALLOW_DOWNGRADE=1` overrides), since a re-published old release would still carry valid signatures. DNS is briefly unavailable during a switch, so the timer runs at 04:30.
+</details>
+
+**Quick start from Docker Hub.** [deploy/docker-compose.dockerhub.yml](deploy/docker-compose.dockerhub.yml) is self-contained and carries the same hardening: copy that one file to the host as `docker-compose.yml`, write the `webpassword` file as above, and run `docker compose up -d`. It pulls `docker.io/benheise/pihole-hardened:latest`, which trusts the tag and updates only when you run `docker compose pull`. The installer and `update.sh` verify signatures and pin the digest. They pull from GHCR by default; to pull the Docker Hub copy with the same verification, set `IMAGE_REPO=docker.io/benheise/pihole-hardened` for `update.sh` (in `pihole-update.service` for the timer).
+
+The update timer runs `update.sh` every night at about 04:30. Each run verifies the newest release and switches to its digest. If the new container isn't healthy within five minutes, it rolls back. It refuses to move to an older release than the one running (`ALLOW_DOWNGRADE=1` overrides), since a re-published old release would still carry valid signatures. DNS is briefly unavailable during a switch, so the timer runs at 04:30.
 
 DHCP needs extra capabilities and host networking; see the comments at the end of `deploy/docker-compose.yml`.
 
-**Portainer and other web editors.** The compose files use paths relative to the file (`./webpassword`, `./etc-pihole`) and read `PIHOLE_IMAGE` from `.env`. A stack pasted into Portainer has neither: replace both paths with absolute paths that exist on the Docker host (for example `/opt/pihole/webpassword` and `/opt/pihole/etc-pihole`), and either set `PIHOLE_IMAGE` under the stack's environment variables or replace the whole `image:` value with `ghcr.io/benheise/pihole-hardened@sha256:...`. While the GHCR package is private (it is after the first release, see `docs/SETUP.md` step 5), the host also needs registry credentials. `deploy/update.sh` does not manage a Portainer stack; update it by changing the digest after running `scripts/verify-release.sh`.
+**Portainer.** The simplest route is the installer: it replaces an existing Portainer stack's container, keeps its data and password, and the nightly timer then handles updates; delete the stack in Portainer afterwards. To keep managing Pi-hole as a Portainer stack instead, the pasted compose file needs three changes, because a stack in Portainer's web editor has no folder of its own: replace `./webpassword` and `./etc-pihole` with absolute paths that exist on the Docker host, and replace the whole `image:` value with `ghcr.io/benheise/pihole-hardened@sha256:...` (or set `PIHOLE_IMAGE` under the stack's environment variables). `update.sh` does not manage a Portainer stack; update it by changing the digest after running `scripts/verify-release.sh`.
+
+**What the installer trusts.** The Pi-hole image itself is verified: signature, signed checksum manifest and attestations, before anything is started. The tools that do the verifying are trusted on first use: `cosign` is downloaded from its GitHub release and checked against the checksum file published beside it (which proves the download is intact, not who made it); Docker, when missing, is installed by Docker's own script from `get.docker.com`; and when the installer runs without a clone, the compose file and the two scripts come from this repository over HTTPS at the latest release tag. If that is more trust than you want to extend, install Docker and cosign from sources you have verified and run the installer from a clone you have reviewed; it only installs what is missing. A registry token entered for a private package is stored in `/opt/pihole/.docker`, readable by root only.
 
 ## Verify a release yourself
 
@@ -105,7 +139,7 @@ upstream.env           upstream versions and tool pins (Renovate-managed)
 .github/workflows/     ci, build (reusable), release, scorecard
 scripts/               scanning, SBOM completion, smoke test, package and tag drift, bundle, Docker Hub copy, verification
 lab/                   functional parity lab (lab/LAB-PLAN.md); security test scripts (lab/security/)
-deploy/                compose files (GHCR by digest, Docker Hub by tag), update script, systemd units
+deploy/                installer, compose files (GHCR by digest, Docker Hub by tag), update script, systemd units
 compliance/            control mapping
 vex/                   OpenVEX statements; triage of CVEs in embedded libraries
 docs/                  setup walkthrough (SETUP.md); test record, lab reports and security reviews (verification/)
